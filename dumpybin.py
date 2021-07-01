@@ -3,7 +3,7 @@ import argparse
 import struct
 import sys
 from os import path
-
+from datetime import datetime
 parser = argparse.ArgumentParser(description='Processes a DLL file and outputs the exported functions and function ordinals, just like the Big Boy Dumpbin does.')
 parser.add_argument('DLL', metavar='DLL', type=str, help='The path to the DLL which should be processed by dumpybin.')
 parser.add_argument('--debug', default="--no-debug", dest='debugMode',action=argparse.BooleanOptionalAction, help='supply this option to output a bunch of debugging data for nerds.')
@@ -28,18 +28,20 @@ try:
 except IOError as x:
     print(f"[-] Failed to read the DLL file, make it readable with chmod +r {DLL} (or the Windows equivalent command).")
     sys.exit()
+# We need an independent copy of fileBytes because we'll use it for RVA offset lookups later.
+originalFileBytes = fileBytes
 
 print(f"[+] Successfully read all {len(fileBytes)} bytes from the DLL, about to check that the file is a valid PE file.")
 
 # Parse the magic number and make sure that it's a valid Windows PE
-if(struct.unpack(">i", fileBytes[0:4])[0] != 0x4d5a9000):
+if(struct.unpack(">L", fileBytes[0:4])[0] != 0x4d5a9000):
     print("[-] The magic bytes don't match a valid PE file, quitting.")
     sys.exit()
 
 print("[+] File is a valid PE file, proceeding to dump it.")
 
 # Attempt to skip over the DOS header and DOS stubs
-PE_FILE_START_OFFSET = fileBytes.find(struct.pack(">i",0x50450000))
+PE_FILE_START_OFFSET = fileBytes.find(struct.pack("<L",0x00004550))
 
 if(PE_FILE_START_OFFSET < 0):
     print("[-] The supplied PE file is corrupted, it has no signature bytes.")
@@ -50,13 +52,15 @@ fileBytes = fileBytes[PE_FILE_START_OFFSET+4:]
 
 # Process the COFF header
 COFF_HEADER_LENGTH = 20
-COFF_HEADER_MACHINE = struct.unpack(">H",fileBytes[0:2])[0]
-COFF_HEADER_NUMBER_SECTIONS = struct.unpack(">H",fileBytes[2:4])[0]
-COFF_HEADER_TIME_DATE_STAMP = struct.unpack(">i",fileBytes[4:8])[0]
-COFF_HEADER_POINTER_TO_SYM_TABLE = struct.unpack(">i",fileBytes[8:12])[0] # Deprecated
-COFF_HEADER_NUMBER_OF_SYMBOL_TABLE = struct.unpack(">i",fileBytes[12:16])[0] # Deprecated
-COFF_HEADER_SIZE_OF_OPTIONAL_HEADER = struct.unpack(">H",fileBytes[16:18])[0]
-COFF_HEADER_CHARACTERISTICS = struct.unpack(">H",fileBytes[18:20])[0]
+COFF_HEADER_MACHINE = struct.unpack("<H",fileBytes[0:2])[0]
+COFF_HEADER_NUMBER_SECTIONS = struct.unpack("<H",fileBytes[2:4])[0]
+COFF_HEADER_TIME_DATE_STAMP = struct.unpack("<L",fileBytes[4:8])[0]
+COFF_HEADER_POINTER_TO_SYM_TABLE = struct.unpack("<L",fileBytes[8:12])[0] # Deprecated
+COFF_HEADER_NUMBER_OF_SYMBOL_TABLE = struct.unpack("<L",fileBytes[12:16])[0] # Deprecated
+COFF_HEADER_SIZE_OF_OPTIONAL_HEADER = struct.unpack("<H",fileBytes[16:18])[0]
+COFF_HEADER_CHARACTERISTICS = struct.unpack("<H",fileBytes[18:20])[0]
+
+print(f"[+] PE was compiled on {datetime.fromtimestamp(COFF_HEADER_TIME_DATE_STAMP)}")
 
 if debugMode:
     print("COFF HEADER FIELDS = \n===========================")
@@ -73,15 +77,15 @@ if debugMode:
 fileBytes = fileBytes[COFF_HEADER_LENGTH:]
 
 COFF_FIELD_LENGTH = 28
-COFF_FIELD_MAGIC = struct.unpack(">H",fileBytes[0:2])[0]
+COFF_FIELD_MAGIC = struct.unpack("<H",fileBytes[0:2])[0]
 COFF_FIELD_MAJOR_LINKER_VERSION = struct.unpack("B",fileBytes[2:3])[0]
 COFF_FIELD_MINOR_LINKER_VERSION = struct.unpack("B",fileBytes[3:4])[0]
-COFF_FIELD_SIZE_OF_CODE = struct.unpack(">i",fileBytes[4:8])[0]
-COFF_FIELD_SIZE_OF_INITIALIZED_DATA = struct.unpack(">i",fileBytes[8:12])[0]
-COFF_FIELD_SIZE_OF_UNINITIALIZED_DATA = struct.unpack(">i",fileBytes[12:16])[0]
-COFF_FIELD_ADDRESS_OF_ENTRY_POINT_RVA = struct.unpack(">L",fileBytes[16:20])[0]
-COFF_FIELD_BASE_OF_CODE_RVA = struct.unpack(">i",fileBytes[20:24])[0]
-COFF_FIELD_BASE_OF_DATA_RVA = struct.unpack(">i",fileBytes[24:28])[0]
+COFF_FIELD_SIZE_OF_CODE = struct.unpack("<L",fileBytes[4:8])[0]
+COFF_FIELD_SIZE_OF_INITIALIZED_DATA = struct.unpack("<L",fileBytes[8:12])[0]
+COFF_FIELD_SIZE_OF_UNINITIALIZED_DATA = struct.unpack("<L",fileBytes[12:16])[0]
+COFF_FIELD_ADDRESS_OF_ENTRY_POINT_RVA = struct.unpack("<L",fileBytes[16:20])[0]
+COFF_FIELD_BASE_OF_CODE_RVA = struct.unpack("<L",fileBytes[20:24])[0]
+COFF_FIELD_BASE_OF_DATA_RVA = struct.unpack("<L",fileBytes[24:28])[0]
 
 if debugMode:
     print()
@@ -102,27 +106,27 @@ if debugMode:
 fileBytes = fileBytes[COFF_FIELD_LENGTH:]
 
 WINDOWS_FIELDS_FIELD_LENGTH = 68
-WINDOWS_FIELDS_IMAGE_BASE  = struct.unpack(">i", fileBytes[0:4])[0]
-WINDOWS_FIELDS_SECTION_ALIGNMENT = struct.unpack(">i", fileBytes[4:8])[0]
-WINDOWS_FIELDS_FILE_ALIGNMENT = struct.unpack(">i", fileBytes[8:12])[0]
-WINDOWS_FIELDS_MAJOR_OPERATING_SYSTEM_VERSION = struct.unpack(">H", fileBytes[12:14])[0]
-WINDOWS_FIELDS_MINOR_OPERATING_SYSTEM_VERSION = struct.unpack(">H", fileBytes[14:16])[0]
-WINDOWS_FIELDS_MAJOR_IMAGE_VERSION = struct.unpack(">H", fileBytes[16:18])[0]
-WINDOWS_FIELDS_MINOR_IMAGE_VERSION = struct.unpack(">H", fileBytes[18:20])[0]
-WINDOWS_FIELDS_MAJOR_SUBSYSTEM_VERSION = struct.unpack(">H", fileBytes[20:22])[0]
-WINDOWS_FIELDS_MINOR_SUBSYSTEM_VERSION = struct.unpack(">H", fileBytes[22:24])[0]
-WINDOWS_FIELDS_WIN32_VERSION_VALUE = struct.unpack(">i", fileBytes[24:28])[0]
-WINDOWS_FIELDS_SIZE_OF_IMAGE = struct.unpack(">i", fileBytes[28:32])[0]
-WINDOWS_FIELDS_SIZE_OF_HEADERS = struct.unpack(">i", fileBytes[32:36])[0]
-WINDOWS_FIELDS_CHECKSUM = struct.unpack(">i", fileBytes[36:40])[0]
-WINDOWS_FIELDS_SUBSYSTEM = struct.unpack(">H", fileBytes[40:42])[0]
-WINDOWS_FIELDS_DLL_CHARACTERISTICS = struct.unpack(">H", fileBytes[42:44])[0]
-WINDOWS_FIELDS_SIZE_OF_STACK_RESERVE = struct.unpack(">i", fileBytes[44:48])[0]
-WINDOWS_FIELDS_SIZE_OF_STACK_COMMIT = struct.unpack(">i", fileBytes[48:52])[0]
-WINDOWS_FIELDS_SIZE_OF_HEAP_RESERVE = struct.unpack(">i", fileBytes[52:56])[0]
-WINDOWS_FIELDS_SIZE_OF_HEAP_COMMIT = struct.unpack(">i", fileBytes[56:60])[0]
-WINDOWS_FIELDS_LOADER_FLAGS = struct.unpack(">i", fileBytes[60:64])[0]
-WINDOWS_FIELDS_NUMBER_OF_RVA_AND_SIZES = struct.unpack(">i", fileBytes[64:68])[0]
+WINDOWS_FIELDS_IMAGE_BASE  = struct.unpack("<L", fileBytes[0:4])[0]
+WINDOWS_FIELDS_SECTION_ALIGNMENT = struct.unpack("<L", fileBytes[4:8])[0]
+WINDOWS_FIELDS_FILE_ALIGNMENT = struct.unpack("<L", fileBytes[8:12])[0]
+WINDOWS_FIELDS_MAJOR_OPERATING_SYSTEM_VERSION = struct.unpack("<H", fileBytes[12:14])[0]
+WINDOWS_FIELDS_MINOR_OPERATING_SYSTEM_VERSION = struct.unpack("<H", fileBytes[14:16])[0]
+WINDOWS_FIELDS_MAJOR_IMAGE_VERSION = struct.unpack("<H", fileBytes[16:18])[0]
+WINDOWS_FIELDS_MINOR_IMAGE_VERSION = struct.unpack("<H", fileBytes[18:20])[0]
+WINDOWS_FIELDS_MAJOR_SUBSYSTEM_VERSION = struct.unpack("<H", fileBytes[20:22])[0]
+WINDOWS_FIELDS_MINOR_SUBSYSTEM_VERSION = struct.unpack("<H", fileBytes[22:24])[0]
+WINDOWS_FIELDS_WIN32_VERSION_VALUE = struct.unpack("<L", fileBytes[24:28])[0]
+WINDOWS_FIELDS_SIZE_OF_IMAGE = struct.unpack("<L", fileBytes[28:32])[0]
+WINDOWS_FIELDS_SIZE_OF_HEADERS = struct.unpack("<L", fileBytes[32:36])[0]
+WINDOWS_FIELDS_CHECKSUM = struct.unpack("<L", fileBytes[36:40])[0]
+WINDOWS_FIELDS_SUBSYSTEM = struct.unpack("<H", fileBytes[40:42])[0]
+WINDOWS_FIELDS_DLL_CHARACTERISTICS = struct.unpack("<H", fileBytes[42:44])[0]
+WINDOWS_FIELDS_SIZE_OF_STACK_RESERVE = struct.unpack("<L", fileBytes[44:48])[0]
+WINDOWS_FIELDS_SIZE_OF_STACK_COMMIT = struct.unpack("<L", fileBytes[48:52])[0]
+WINDOWS_FIELDS_SIZE_OF_HEAP_RESERVE = struct.unpack("<L", fileBytes[52:56])[0]
+WINDOWS_FIELDS_SIZE_OF_HEAP_COMMIT = struct.unpack("<L", fileBytes[56:60])[0]
+WINDOWS_FIELDS_LOADER_FLAGS = struct.unpack("<L", fileBytes[60:64])[0]
+WINDOWS_FIELDS_NUMBER_OF_RVA_AND_SIZES = struct.unpack("<L", fileBytes[64:68])[0]
 
 if debugMode:
     print()
@@ -152,3 +156,75 @@ if debugMode:
 
 # Rebase the file bytes to skip over the windows specific fields
 fileBytes = fileBytes[WINDOWS_FIELDS_FIELD_LENGTH:]
+DATA_DIRECTORY_LENGTH = 128
+DATA_DIRECTORY_EXPORT_TABLE = struct.unpack("<L", fileBytes[0:4])[0]
+DATA_DIRECTORY_SIZE_OF_EXPORT_TABLE = struct.unpack("<L", fileBytes[4:8])[0]
+DATA_DIRECTORY_IMPORT_TABLE = struct.unpack("<L", fileBytes[8:12])[0]
+DATA_DIRECTORY_SIZE_OF_IMPORT_TABLE = struct.unpack("<L", fileBytes[12:16])[0]
+DATA_DIRECTORY_RESOURCE_TABLE = struct.unpack("<L", fileBytes[16:20])[0]
+DATA_DIRECTORY_SIZE_OF_RESOURCE_TABLE = struct.unpack("<L", fileBytes[20:24])[0]
+DATA_DIRECTORY_EXCEPTION_TABLE = struct.unpack("<L", fileBytes[24:28])[0]
+DATA_DIRECTORY_SIZE_OF_EXCEPTION_TABLE = struct.unpack("<L", fileBytes[28:32])[0]
+DATA_DIRECTORY_CERTIFICATE_TABLE = struct.unpack("<L", fileBytes[32:36])[0]
+DATA_DIRECTORY_SIZE_OF_CERTIFICATE_TABLE = struct.unpack("<L", fileBytes[36:40])[0]
+DATA_DIRECTORY_BASE_RELOCATION_TABLE = struct.unpack("<L", fileBytes[40:44])[0]
+DATA_DIRECTORY_SIZE_OF_BASE_RELOCATION_TABLE = struct.unpack("<L", fileBytes[44:48])[0]
+DATA_DIRECTORY_DEBUG = struct.unpack("<L", fileBytes[48:52])[0]
+DATA_DIRECTORY_SIZE_OF_DEBUG = struct.unpack("<L", fileBytes[52:56])[0]
+DATA_DIRECTORY_ARCHITECTURE_DATA = struct.unpack("<L", fileBytes[56:60])[0]
+DATA_DIRECTORY_SIZE_OF_ARCHITECTURE_DATA = struct.unpack("<L", fileBytes[60:64])[0]
+DATA_DIRECTORY_GLOBAL_PTR = struct.unpack("<L", fileBytes[64:68])[0]
+DATA_DIRECTORY_NULL_BYTES_1 = struct.unpack("<L", fileBytes[68:72])[0]
+DATA_DIRECTORY_TLS_TABLE = struct.unpack("<L", fileBytes[72:76])[0]
+DATA_DIRECTORY_SIZE_OF_TLS_TABLE = struct.unpack("<L", fileBytes[76:80])[0]
+DATA_DIRECTORY_LOAD_CONFIG_TABLE = struct.unpack("<L", fileBytes[80:84])[0]
+DATA_DIRECTORY_SIZE_OF_LOAD_CONFIG_TABLE = struct.unpack("<L", fileBytes[84:88])[0]
+DATA_DIRECTORY_BOUND_IMPORT = struct.unpack("<L", fileBytes[88:92])[0]
+DATA_DIRECTORY_SIZE_OF_BOUND_IMPORT = struct.unpack("<L", fileBytes[92:96])[0]
+DATA_DIRECTORY_IMPORT_ADDRESS_TABLE = struct.unpack("<L", fileBytes[96:100])[0]
+DATA_DIRECTORY_SIZE_OF_IMPORT_ADDRESS_TABLE = struct.unpack("<L", fileBytes[100:104])[0]
+DATA_DIRECTORY_DELAY_IMPORT_DESCRIPTOR = struct.unpack("<L", fileBytes[104:108])[0]
+DATA_DIRECTORY_SIZE_OF_DELAY_IMPORT_DESCRIPTOR = struct.unpack("<L", fileBytes[108:112])[0]
+DATA_DIRECTORY_CLR_RUNTIME_HEADER = struct.unpack("<L", fileBytes[112:116])[0]
+DATA_DIRECTORY_SIZE_OF_CLR_RUNTIME_HEADER = struct.unpack("<L", fileBytes[116:120])[0]
+DATA_DIRECTORY_NULL_BYTES_2 = struct.unpack("<L", fileBytes[120:124])[0]
+DATA_DIRECTORY_NULL_BYTES_3 = struct.unpack("<L", fileBytes[124:128])[0]
+
+if debugMode:
+    print()
+    print("DATA DIRECTORY FIELDS = \n===========================")
+    print("DATA_DIRECTORY_LENGTH =  " + hex(DATA_DIRECTORY_LENGTH))
+    print("DATA_DIRECTORY_EXPORT_TABLE = " + hex(DATA_DIRECTORY_EXPORT_TABLE))
+    print("DATA_DIRECTORY_SIZE_OF_EXPORT_TABLE = " + hex(DATA_DIRECTORY_SIZE_OF_EXPORT_TABLE))
+    print("DATA_DIRECTORY_IMPORT_TABLE = " + hex(DATA_DIRECTORY_IMPORT_TABLE))
+    print("DATA_DIRECTORY_SIZE_OF_IMPORT_TABLE = " + hex(DATA_DIRECTORY_SIZE_OF_IMPORT_TABLE))
+    print("DATA_DIRECTORY_RESOURCE_TABLE = " + hex(DATA_DIRECTORY_RESOURCE_TABLE))
+    print("DATA_DIRECTORY_SIZE_OF_RESOURCE_TABLE = " + hex(DATA_DIRECTORY_SIZE_OF_RESOURCE_TABLE))
+    print("DATA_DIRECTORY_EXCEPTION_TABLE = " + hex(DATA_DIRECTORY_EXCEPTION_TABLE))
+    print("DATA_DIRECTORY_SIZE_OF_EXCEPTION_TABLE = " + hex(DATA_DIRECTORY_SIZE_OF_EXCEPTION_TABLE))
+    print("DATA_DIRECTORY_CERTIFICATE_TABLE = " + hex(DATA_DIRECTORY_CERTIFICATE_TABLE))
+    print("DATA_DIRECTORY_SIZE_OF_CERTIFICATE_TABLE = " + hex(DATA_DIRECTORY_SIZE_OF_CERTIFICATE_TABLE))
+    print("DATA_DIRECTORY_BASE_RELOCATION_TABLE = " + hex(DATA_DIRECTORY_BASE_RELOCATION_TABLE))
+    print("DATA_DIRECTORY_SIZE_OF_BASE_RELOCATION_TABLE = " + hex(DATA_DIRECTORY_SIZE_OF_BASE_RELOCATION_TABLE))
+    print("DATA_DIRECTORY_DEBUG = " + hex(DATA_DIRECTORY_DEBUG))
+    print("DATA_DIRECTORY_SIZE_OF_DEBUG = " + hex(DATA_DIRECTORY_SIZE_OF_DEBUG))
+    print("DATA_DIRECTORY_ARCHITECTURE_DATA = " + hex(DATA_DIRECTORY_ARCHITECTURE_DATA))
+    print("DATA_DIRECTORY_SIZE_OF_ARCHITECTURE_DATA = " + hex(DATA_DIRECTORY_SIZE_OF_ARCHITECTURE_DATA))
+    print("DATA_DIRECTORY_GLOBAL_PTR = " + hex(DATA_DIRECTORY_GLOBAL_PTR))
+    print("DATA_DIRECTORY_NULL_BYTES_1 = " + hex(DATA_DIRECTORY_NULL_BYTES_1))
+    print("DATA_DIRECTORY_TLS_TABLE = " + hex(DATA_DIRECTORY_TLS_TABLE))
+    print("DATA_DIRECTORY_SIZE_OF_TLS_TABLE = " + hex(DATA_DIRECTORY_SIZE_OF_TLS_TABLE))
+    print("DATA_DIRECTORY_LOAD_CONFIG_TABLE = " + hex(DATA_DIRECTORY_LOAD_CONFIG_TABLE))
+    print("DATA_DIRECTORY_SIZE_OF_LOAD_CONFIG_TABLE = " + hex(DATA_DIRECTORY_SIZE_OF_LOAD_CONFIG_TABLE))
+    print("DATA_DIRECTORY_BOUND_IMPORT = " + hex(DATA_DIRECTORY_BOUND_IMPORT))
+    print("DATA_DIRECTORY_SIZE_OF_BOUND_IMPORT = " + hex(DATA_DIRECTORY_SIZE_OF_BOUND_IMPORT))
+    print("DATA_DIRECTORY_IMPORT_ADDRESS_TABLE = " + hex(DATA_DIRECTORY_IMPORT_ADDRESS_TABLE))
+    print("DATA_DIRECTORY_SIZE_OF_IMPORT_ADDRESS_TABLE = " + hex(DATA_DIRECTORY_SIZE_OF_IMPORT_ADDRESS_TABLE))
+    print("DATA_DIRECTORY_DELAY_IMPORT_DESCRIPTOR = " + hex(DATA_DIRECTORY_DELAY_IMPORT_DESCRIPTOR))
+    print("DATA_DIRECTORY_SIZE_OF_DELAY_IMPORT_DESCRIPTOR = " + hex(DATA_DIRECTORY_SIZE_OF_DELAY_IMPORT_DESCRIPTOR))
+    print("DATA_DIRECTORY_CLR_RUNTIME_HEADER = " + hex(DATA_DIRECTORY_CLR_RUNTIME_HEADER))
+    print("DATA_DIRECTORY_SIZE_OF_CLR_RUNTIME_HEADER = " + hex(DATA_DIRECTORY_SIZE_OF_CLR_RUNTIME_HEADER))
+    print("DATA_DIRECTORY_NULL_BYTES_2 = " + hex(DATA_DIRECTORY_NULL_BYTES_2))
+    print("DATA_DIRECTORY_NULL_BYTES_3 = " + hex(DATA_DIRECTORY_NULL_BYTES_3))
+
+print(fileBytes[0:128])
