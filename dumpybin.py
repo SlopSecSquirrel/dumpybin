@@ -227,4 +227,35 @@ if debugMode:
     print("DATA_DIRECTORY_NULL_BYTES_2 = " + hex(DATA_DIRECTORY_NULL_BYTES_2))
     print("DATA_DIRECTORY_NULL_BYTES_3 = " + hex(DATA_DIRECTORY_NULL_BYTES_3))
 
-print(fileBytes[0:128])
+# Rebase the file bytes to skip over the data directory fields
+fileBytes = fileBytes[DATA_DIRECTORY_LENGTH:]
+
+# Iterate over all of the sections in the PE, dumping their data.
+for section in range(1, COFF_HEADER_NUMBER_SECTIONS+1):
+    SECTION_NAME = str(fileBytes[0:8],"ascii")
+    SECTION_VIRTUAL_SIZE = struct.unpack("<L", fileBytes[8:12])[0]
+    SECTION_VIRTUAL_ADDRESS = struct.unpack("<L", fileBytes[12:16])[0]
+    SECTION_SIZE_OF_RAW_DATA = struct.unpack("<L", fileBytes[16:20])[0]
+    SECTION_POINTER_TO_RAW_DATA = struct.unpack("<L", fileBytes[20:24])[0]
+    SECTION_POINTER_TO_RELOCATIONS = struct.unpack("<L", fileBytes[24:28])[0]
+    SECTION_POINTER_TO_LINE_NUMBERS = struct.unpack("<L", fileBytes[28:32])[0]
+    SECTION_NUMBER_OF_RELOCATIONS = struct.unpack("<H", fileBytes[32:34])[0]
+    SECTION_NUMBER_OF_LINE_NUMBERS = struct.unpack("<H", fileBytes[34:36])[0]
+    SECTION_CHARACTERISTICS = struct.unpack("<L", fileBytes[36:40])[0]
+
+
+    if(debugMode):
+        print()
+        print(f"Section {section} ({SECTION_NAME}) \n===========================")
+        print("SECTION_NAME = "+SECTION_NAME)
+        print("SECTION_VIRTUAL_SIZE = "+hex(SECTION_VIRTUAL_SIZE))
+        print("SECTION_VIRTUAL_ADDRESS = "+hex(SECTION_VIRTUAL_ADDRESS))
+        print("SECTION_SIZE_OF_RAW_DATA = "+hex(SECTION_SIZE_OF_RAW_DATA))
+        print("SECTION_POINTER_TO_RAW_DATA = "+hex(SECTION_POINTER_TO_RAW_DATA))
+        print("SECTION_POINTER_TO_RELOCATIONS = "+hex(SECTION_POINTER_TO_RELOCATIONS))
+        print("SECTION_POINTER_TO_LINE_NUMBERS = "+hex(SECTION_POINTER_TO_LINE_NUMBERS))
+        print("SECTION_NUMBER_OF_RELOCATIONS = "+hex(SECTION_NUMBER_OF_RELOCATIONS))
+        print("SECTION_NUMBER_OF_LINE_NUMBERS = "+hex(SECTION_NUMBER_OF_LINE_NUMBERS))
+        print("SECTION_CHARACTERISTICS = "+hex(SECTION_CHARACTERISTICS))
+    # Rebase fileBytes to the next section.
+    fileBytes = fileBytes[40:]
