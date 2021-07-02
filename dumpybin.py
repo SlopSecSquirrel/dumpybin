@@ -20,11 +20,15 @@ parser = argparse.ArgumentParser(description='Processes a DLL file and outputs t
 parser.add_argument('DLL', metavar='DLL', type=str, help='The path to the DLL which should be processed by dumpybin.')
 parser.add_argument('--debug', dest='debugMode',action="store_true", help='supply this option to output a bunch of debugging data for nerds.')
 parser.add_argument("-s", "--sections", help="Dump out sections data", action="store_true")
+parser.add_argument("-i", "--imports", help="Dump out import data", action="store_true")
+parser.add_argument("-e", "--exports", help="Dump out export data", action="store_true")
 
 args = parser.parse_args()
 DLL = args.DLL
 debugMode = args.debugMode
 dumpSections = args.sections
+dumpImports = args.imports
+dumpExports = args.exports
 
 # Check if the file even exists
 if not path.exists(DLL):
@@ -239,9 +243,6 @@ if debugMode:
 # Rebase the file bytes to skip over the data directory fields
 fileBytes = fileBytes[DATA_DIRECTORY_LENGTH:]
 
-if(dumpSections):
-    print("[+] Sections - ")
-
 # Making a dictionary from section name to raw data pointer (we need this to process imports and exports)
 sections = {}
 # Iterate over all of the sections in the PE, dumping their data.
@@ -256,8 +257,7 @@ for section in range(1, COFF_HEADER_NUMBER_SECTIONS+1):
     SECTION_NUMBER_OF_RELOCATIONS = struct.unpack("<H", fileBytes[32:34])[0]
     SECTION_NUMBER_OF_LINE_NUMBERS = struct.unpack("<H", fileBytes[34:36])[0]
     SECTION_CHARACTERISTICS = struct.unpack("<L", fileBytes[36:40])[0]
-    sections[SECTION_NAME] = SECTION_POINTER_TO_RAW_DATA
-    print(sections)
+    sections[SECTION_NAME] = (SECTION_POINTER_TO_RAW_DATA, SECTION_VIRTUAL_ADDRESS, SECTION_VIRTUAL_SIZE)
 
     if(debugMode):
         print()
@@ -273,31 +273,171 @@ for section in range(1, COFF_HEADER_NUMBER_SECTIONS+1):
         print("SECTION_NUMBER_OF_LINE_NUMBERS = "+hex(SECTION_NUMBER_OF_LINE_NUMBERS))
         print("SECTION_CHARACTERISTICS = "+hex(SECTION_CHARACTERISTICS))
     
-    if(dumpSections):
-        print(f"    {SECTION_NAME} - RVA: {hex(SECTION_VIRTUAL_ADDRESS)}, Size: {hex(SECTION_VIRTUAL_SIZE)}")
     # Rebase fileBytes to the next section.
     fileBytes = fileBytes[40:]
+
+if(dumpSections):
+    print("[+] Sections - ")
+    for key in sections:
+        print(f"    {key} - Raw Data Pointer: {hex(sections[key][0])} RVA: {hex(sections[key][1])}, Size: {hex(sections[key][2])}")
+    print()
+
 
 # Process the DLL Import Table. Rebase fileBytes back to 0 so that RVAs work correctly.
 fileBytes = originalFileBytes
 
-# In order to read the export table, there must be a section in the PE file named ".idata"
+# In order to read the import table, there must be a section in the PE file named ".idata"
 importTableOffset = 0
 try:
-    importTableOffset = sections[".idata"]
-except KeyError:
-    print("[-] The supplied binary doesn't have a .idata section, can't process the Import Table. Quitting.")
+    importTableOffset = sections[".idata"][0]
 
-print(hex(importTableOffset))
-fileBytes = originalFileBytes[importTableOffset:]
-# Loop infinitely until the import directory table has been processed fully. (20 null bytes in a row.)
-while 1:
-    EXPORT_DIRECTORY_ORIGINAL_FIRST_THUNK = struct.unpack("<L", fileBytes[0:4])[0]
+    fileBytes = originalFileBytes[importTableOffset:]
+    dllImports = {}
+    # Loop infinitely until the import directory table has been processed fully. (20 null bytes in a row.)
+    while 1:
+        IMPORT_DIRECTORY_ORIGINAL_FIRST_THUNK = struct.unpack("<L", fileBytes[0:4])[0]
+        IMPORT_DIRECTORY_TIME_DATE_STAMP = struct.unpack("<L", fileBytes[4:8])[0]
+        IMPORT_DIRECTORY_FORWARDER_CHAIN = struct.unpack("<L", fileBytes[8:12])[0]
+        IMPORT_DIRECTORY_NAME = struct.unpack("<L", fileBytes[12:16])[0]
+        IMPORT_DIRECTORY_FIRST_THUNK = struct.unpack("<L", fileBytes[16:20])[0]
+        if(debugMode):
+            print()
+            print("IMPORT DIRECTORY FIELDS = \n===========================")
+            print("IMPORT_DIRECTORY_ORIGINAL_FIRST_THUNK = " + hex(IMPORT_DIRECTORY_ORIGINAL_FIRST_THUNK))
+            print("IMPORT_DIRECTORY_TIME_DATE_STAMP = " + hex(IMPORT_DIRECTORY_TIME_DATE_STAMP) + " ("+str(datetime.fromtimestamp(IMPORT_DIRECTORY_TIME_DATE_STAMP))+")")
+            print("IMPORT_DIRECTORY_FORWARDER_CHAIN = " + hex(IMPORT_DIRECTORY_FORWARDER_CHAIN))
+            print("IMPORT_DIRECTORY_NAME = " + hex(IMPORT_DIRECTORY_NAME))
+            print("IMPORT_DIRECTORY_FIRST_THUNK = " + hex(IMPORT_DIRECTORY_FIRST_THUNK))
+            print()
+        
+        # Subtracting DATA_DIRECTORY_IMPORT_TABLE from each field to go from RVA offset values to raw file offset values.
+        IMPORT_DIRECTORY_ORIGINAL_FIRST_THUNK = IMPORT_DIRECTORY_ORIGINAL_FIRST_THUNK-DATA_DIRECTORY_IMPORT_TABLE
+        IMPORT_DIRECTORY_FIRST_THUNK = IMPORT_DIRECTORY_FIRST_THUNK-DATA_DIRECTORY_IMPORT_TABLE
+        IMPORT_DIRECTORY_NAME = IMPORT_DIRECTORY_NAME-DATA_DIRECTORY_IMPORT_TABLE
+
+        # I fully acknowledge that this line looks insane, but IMPORT_DIRECTORY_NAME is (for example) 0x6153, DATA_DIRECTORY_IMPORT_TABLE is (for example) 0x6000
+        # So importTableOffset + (0x6153-0x6000) gives us the offset in the raw data to where the DLL name string lives.
+        importedDllName = (processString(originalFileBytes[importTableOffset+IMPORT_DIRECTORY_NAME:]))
+        dllImports[importedDllName] = []
+            
+        # Start looping over the array of IMAGE_THUNK_DATA pointers, stopping when a null pointer is reached.
+        thunkDataPointers = []
+        offsetIntoArray = 0
+        while 1:
+            # import table + array of thunks + offset into array. Multiplied by 4 because the array is full of DWORDS
+            offset = importTableOffset+IMPORT_DIRECTORY_ORIGINAL_FIRST_THUNK+(offsetIntoArray*4)      
+            pointer = struct.unpack("<L",originalFileBytes[offset:offset+4])[0]
+            # Once we reach a null pointer we've extracted all of the pointers successfully.
+            if(pointer == 0):
+                break
+            # Rebase the pointer from RVA offset to raw file offset
+            pointer = pointer - DATA_DIRECTORY_IMPORT_TABLE
+            pointer = importTableOffset + pointer
+
+            thunkDataPointers.append(pointer)
+            offsetIntoArray += 1
+        
+        for pointer in thunkDataPointers:
+            # Ordinals are shorts.
+            ordinal = struct.unpack("<H", originalFileBytes[pointer:pointer+2])[0]
+            importName = processString(originalFileBytes[pointer+2:])
+            dllImports[importedDllName].append((ordinal, importName))
+
+        # Advance file bytes to the next Import Directory record
+        fileBytes = fileBytes[20:]
+
+        # If the next Import Directory record is completely empty (full of nulls) then we've processed the entire directory.
+        if(fileBytes[0:20] == (b"\x00"*20)):
+            break
+
+    if(dumpImports):
+        print("[+] Imports - ")
+        for key in dllImports:
+            print("    Imported DLL name: " + key)
+            print("    ======================================")
+            for ordinal, importName in dllImports[key]:
+                print(f"    Ordinal #{ordinal}, function name: {importName}")
+            print()
+except KeyError:
+    if(dumpImports):
+        print("[-] The supplied binary doesn't have a .idata section, can't process the Import Table.")
+
+
+# Process the DLL Export Table. Rebase fileBytes back to 0 so that RVAs work correctly.
+fileBytes = originalFileBytes
+
+# In order to read the export table, there must be a section in the PE file named ".edata"
+exportTableOffset = 0
+try:
+    exportTableOffset = sections[".edata"][0]
+
+    fileBytes = originalFileBytes[exportTableOffset:]
+    dllExports = {}
+
+    EXPORT_DIRECTORY_LENGTH = 40
+    EXPORT_DIRECTORY_CHARACTERISTICS = struct.unpack("<L", fileBytes[0:4])[0]
     EXPORT_DIRECTORY_TIME_DATE_STAMP = struct.unpack("<L", fileBytes[4:8])[0]
-    EXPORT_DIRECTORY_FORWARDER_CHAIN = struct.unpack("<L", fileBytes[8:12])[0]
+    EXPORT_DIRECTORY_MAJOR_VERSION = struct.unpack("<H", fileBytes[8:10])[0]
+    EXPORT_DIRECTORY_MINOR_VERSION = struct.unpack("<H", fileBytes[10:12])[0]
     EXPORT_DIRECTORY_NAME = struct.unpack("<L", fileBytes[12:16])[0]
-    EXPORT_DIRECTORY_FIRST_THUNK = struct.unpack("<L", fileBytes[16:20])[0]
-    # I fully acknowledge that this line looks insane, but EXPORT_DIRECTORY_NAME is (for example) 0x6153, DATA_DIRECTORY_IMPORT_TABLE is (for example) 0x6000
-    # So importTableOffset + (0x6153-0x6000) gives us the offset in the raw data to where the DLL name string lives.
-    importedDllName = (processString(originalFileBytes[importTableOffset+(EXPORT_DIRECTORY_NAME-DATA_DIRECTORY_IMPORT_TABLE):]))
-    break
+    EXPORT_DIRECTORY_BASE = struct.unpack("<L", fileBytes[16:20])[0]
+    EXPORT_DIRECTORY_NUMBER_OF_FUNCTIONS = struct.unpack("<L", fileBytes[20:24])[0]
+    EXPORT_DIRECTORY_NUMBER_OF_NAMES = struct.unpack("<L", fileBytes[24:28])[0]
+    EXPORT_DIRECTORY_ADDRESS_OF_FUNCTIONS = struct.unpack("<L", fileBytes[28:32])[0]
+    EXPORT_DIRECTORY_ADDRESS_OF_NAMES = struct.unpack("<L", fileBytes[32:36])[0]
+    EXPORT_DIRECTORY_ADDRESS_OF_NAME_ORDINALS = struct.unpack("<L", fileBytes[36:40])[0]
+
+    if(debugMode):
+        print("EXPORT DIRECTORY FIELDS = \n===========================")
+        print("EXPORT_DIRECTORY_LENGTH = " + hex(EXPORT_DIRECTORY_LENGTH))
+        print("EXPORT_DIRECTORY_CHARACTERISTICS = " + hex(EXPORT_DIRECTORY_CHARACTERISTICS))
+        print("EXPORT_DIRECTORY_TIME_DATE_STAMP = " + hex(EXPORT_DIRECTORY_TIME_DATE_STAMP) + " ("+str(datetime.fromtimestamp(EXPORT_DIRECTORY_TIME_DATE_STAMP))+")")
+        print("EXPORT_DIRECTORY_MAJOR_VERSION = " + hex(EXPORT_DIRECTORY_MAJOR_VERSION))
+        print("EXPORT_DIRECTORY_MINOR_VERSION = " + hex(EXPORT_DIRECTORY_MINOR_VERSION))
+        print("EXPORT_DIRECTORY_NAME = " + hex(EXPORT_DIRECTORY_NAME))
+        print("EXPORT_DIRECTORY_BASE = " + hex(EXPORT_DIRECTORY_BASE))
+        print("EXPORT_DIRECTORY_NUMBER_OF_FUNCTIONS = " + hex(EXPORT_DIRECTORY_NUMBER_OF_FUNCTIONS))
+        print("EXPORT_DIRECTORY_NUMBER_OF_NAMES = " + hex(EXPORT_DIRECTORY_NUMBER_OF_NAMES))
+        print("EXPORT_DIRECTORY_ADDRESS_OF_FUNCTIONS = " + hex(EXPORT_DIRECTORY_ADDRESS_OF_FUNCTIONS))
+        print("EXPORT_DIRECTORY_ADDRESS_OF_NAMES = " + hex(EXPORT_DIRECTORY_ADDRESS_OF_NAMES))
+        print("EXPORT_DIRECTORY_ADDRESS_OF_NAME_ORDINALS = " + hex(EXPORT_DIRECTORY_ADDRESS_OF_NAME_ORDINALS))
+    
+    # Do the same subtraction trick as with imports to go from RVA-based offsets to file based offsets
+    EXPORT_DIRECTORY_NAME -= DATA_DIRECTORY_EXPORT_TABLE
+    EXPORT_DIRECTORY_ADDRESS_OF_FUNCTIONS -= DATA_DIRECTORY_EXPORT_TABLE
+    EXPORT_DIRECTORY_ADDRESS_OF_NAMES -= DATA_DIRECTORY_EXPORT_TABLE
+    EXPORT_DIRECTORY_ADDRESS_OF_NAME_ORDINALS -= DATA_DIRECTORY_EXPORT_TABLE
+
+    exportedName = processString(originalFileBytes[exportTableOffset+EXPORT_DIRECTORY_NAME:])
+    arrayOfNameOrdinalTuples = []
+    
+    # Quick sanity check to make sure that the number of names matches the number of functions (otherwise we're in trouble)
+    if EXPORT_DIRECTORY_NUMBER_OF_FUNCTIONS != EXPORT_DIRECTORY_NUMBER_OF_NAMES:
+        if(dumpExports):
+            print("[-] The EXPORT_DIRECTORY_NUMBER_OF_FUNCTIONS field doesn't match EXPORT_DIRECTORY_NUMBER_OF_NAMES, cannot dump exports.")
+        raise NameError
+
+    i = 0
+    while i < EXPORT_DIRECTORY_NUMBER_OF_FUNCTIONS:
+        namePointerOffset = exportTableOffset+EXPORT_DIRECTORY_ADDRESS_OF_NAMES+(i*4) # These pointers are DWORDs, so i*4
+        functionPointerOffset = exportTableOffset+EXPORT_DIRECTORY_ADDRESS_OF_FUNCTIONS+(i*4) # These pointers are DWORDs, so i*4
+        nameOffset = struct.unpack("<L", originalFileBytes[namePointerOffset:namePointerOffset+4])[0]
+        nameOffset -= DATA_DIRECTORY_EXPORT_TABLE
+        ordinalOffset = exportTableOffset+EXPORT_DIRECTORY_ADDRESS_OF_NAME_ORDINALS+(i*2) # The name ordinals are WORDs, so i*2
+        currFunctionName = processString(originalFileBytes[exportTableOffset+nameOffset:]) #
+        currFunctionOrdinal = struct.unpack("<H", originalFileBytes[ordinalOffset:ordinalOffset+2])[0]
+        currFunctionRVA =  struct.unpack("<L", originalFileBytes[functionPointerOffset:functionPointerOffset+4])[0]
+        i+=1
+        arrayOfNameOrdinalTuples.append((currFunctionOrdinal, currFunctionName, currFunctionRVA))
+
+except KeyError:
+    if(dumpExports):
+        print("[-] The supplied binary doesn't have a .edata section, can't process the Export Table.")
+except NameError: 
+    pass
+
+if dumpExports:
+    print("[+] Exports - ")
+    for currFunctionOrdinal, currFunctionName, currFunctionRVA in arrayOfNameOrdinalTuples:
+        print(f"    Ordinal #{currFunctionOrdinal}, function name: {currFunctionName}, function RVA: { hex(currFunctionRVA) }")
+    print()
