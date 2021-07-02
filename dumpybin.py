@@ -4,14 +4,27 @@ import struct
 import sys
 from os import path
 from datetime import datetime
+import binascii 
+
+def processString(binary_bytes):
+    chars = []
+    counter = 0
+    while True:
+        c = binary_bytes[counter]
+        if c == 0x0:
+            return "".join(chars)
+        chars.append(chr(binary_bytes[counter]))
+        counter += 1
+
 parser = argparse.ArgumentParser(description='Processes a DLL file and outputs the exported functions and function ordinals, just like the Big Boy Dumpbin does.')
 parser.add_argument('DLL', metavar='DLL', type=str, help='The path to the DLL which should be processed by dumpybin.')
-parser.add_argument('--debug', default="--no-debug", dest='debugMode',action=argparse.BooleanOptionalAction, help='supply this option to output a bunch of debugging data for nerds.')
-
+parser.add_argument('--debug', dest='debugMode',action="store_true", help='supply this option to output a bunch of debugging data for nerds.')
+parser.add_argument("-s", "--sections", help="Dump out sections data", action="store_true")
 
 args = parser.parse_args()
 DLL = args.DLL
 debugMode = args.debugMode
+dumpSections = args.sections
 
 # Check if the file even exists
 if not path.exists(DLL):
@@ -30,7 +43,6 @@ except IOError as x:
     sys.exit()
 # We need an independent copy of fileBytes because we'll use it for RVA offset lookups later.
 originalFileBytes = fileBytes
-
 print(f"[+] Successfully read all {len(fileBytes)} bytes from the DLL, about to check that the file is a valid PE file.")
 
 # Parse the magic number and make sure that it's a valid Windows PE
@@ -211,7 +223,6 @@ if debugMode:
     print("DATA_DIRECTORY_ARCHITECTURE_DATA = " + hex(DATA_DIRECTORY_ARCHITECTURE_DATA))
     print("DATA_DIRECTORY_SIZE_OF_ARCHITECTURE_DATA = " + hex(DATA_DIRECTORY_SIZE_OF_ARCHITECTURE_DATA))
     print("DATA_DIRECTORY_GLOBAL_PTR = " + hex(DATA_DIRECTORY_GLOBAL_PTR))
-    print("DATA_DIRECTORY_NULL_BYTES_1 = " + hex(DATA_DIRECTORY_NULL_BYTES_1))
     print("DATA_DIRECTORY_TLS_TABLE = " + hex(DATA_DIRECTORY_TLS_TABLE))
     print("DATA_DIRECTORY_SIZE_OF_TLS_TABLE = " + hex(DATA_DIRECTORY_SIZE_OF_TLS_TABLE))
     print("DATA_DIRECTORY_LOAD_CONFIG_TABLE = " + hex(DATA_DIRECTORY_LOAD_CONFIG_TABLE))
@@ -224,15 +235,18 @@ if debugMode:
     print("DATA_DIRECTORY_SIZE_OF_DELAY_IMPORT_DESCRIPTOR = " + hex(DATA_DIRECTORY_SIZE_OF_DELAY_IMPORT_DESCRIPTOR))
     print("DATA_DIRECTORY_CLR_RUNTIME_HEADER = " + hex(DATA_DIRECTORY_CLR_RUNTIME_HEADER))
     print("DATA_DIRECTORY_SIZE_OF_CLR_RUNTIME_HEADER = " + hex(DATA_DIRECTORY_SIZE_OF_CLR_RUNTIME_HEADER))
-    print("DATA_DIRECTORY_NULL_BYTES_2 = " + hex(DATA_DIRECTORY_NULL_BYTES_2))
-    print("DATA_DIRECTORY_NULL_BYTES_3 = " + hex(DATA_DIRECTORY_NULL_BYTES_3))
 
 # Rebase the file bytes to skip over the data directory fields
 fileBytes = fileBytes[DATA_DIRECTORY_LENGTH:]
 
+if(dumpSections):
+    print("[+] Sections - ")
+
+# Making a dictionary from section name to raw data pointer (we need this to process imports and exports)
+sections = {}
 # Iterate over all of the sections in the PE, dumping their data.
 for section in range(1, COFF_HEADER_NUMBER_SECTIONS+1):
-    SECTION_NAME = str(fileBytes[0:8],"ascii")
+    SECTION_NAME = str(fileBytes[0:8],"ascii").replace("\x00","")
     SECTION_VIRTUAL_SIZE = struct.unpack("<L", fileBytes[8:12])[0]
     SECTION_VIRTUAL_ADDRESS = struct.unpack("<L", fileBytes[12:16])[0]
     SECTION_SIZE_OF_RAW_DATA = struct.unpack("<L", fileBytes[16:20])[0]
@@ -242,7 +256,8 @@ for section in range(1, COFF_HEADER_NUMBER_SECTIONS+1):
     SECTION_NUMBER_OF_RELOCATIONS = struct.unpack("<H", fileBytes[32:34])[0]
     SECTION_NUMBER_OF_LINE_NUMBERS = struct.unpack("<H", fileBytes[34:36])[0]
     SECTION_CHARACTERISTICS = struct.unpack("<L", fileBytes[36:40])[0]
-
+    sections[SECTION_NAME] = SECTION_POINTER_TO_RAW_DATA
+    print(sections)
 
     if(debugMode):
         print()
@@ -257,5 +272,32 @@ for section in range(1, COFF_HEADER_NUMBER_SECTIONS+1):
         print("SECTION_NUMBER_OF_RELOCATIONS = "+hex(SECTION_NUMBER_OF_RELOCATIONS))
         print("SECTION_NUMBER_OF_LINE_NUMBERS = "+hex(SECTION_NUMBER_OF_LINE_NUMBERS))
         print("SECTION_CHARACTERISTICS = "+hex(SECTION_CHARACTERISTICS))
+    
+    if(dumpSections):
+        print(f"    {SECTION_NAME} - RVA: {hex(SECTION_VIRTUAL_ADDRESS)}, Size: {hex(SECTION_VIRTUAL_SIZE)}")
     # Rebase fileBytes to the next section.
     fileBytes = fileBytes[40:]
+
+# Process the DLL Import Table. Rebase fileBytes back to 0 so that RVAs work correctly.
+fileBytes = originalFileBytes
+
+# In order to read the export table, there must be a section in the PE file named ".idata"
+importTableOffset = 0
+try:
+    importTableOffset = sections[".idata"]
+except KeyError:
+    print("[-] The supplied binary doesn't have a .idata section, can't process the Import Table. Quitting.")
+
+print(hex(importTableOffset))
+fileBytes = originalFileBytes[importTableOffset:]
+# Loop infinitely until the import directory table has been processed fully. (20 null bytes in a row.)
+while 1:
+    EXPORT_DIRECTORY_ORIGINAL_FIRST_THUNK = struct.unpack("<L", fileBytes[0:4])[0]
+    EXPORT_DIRECTORY_TIME_DATE_STAMP = struct.unpack("<L", fileBytes[4:8])[0]
+    EXPORT_DIRECTORY_FORWARDER_CHAIN = struct.unpack("<L", fileBytes[8:12])[0]
+    EXPORT_DIRECTORY_NAME = struct.unpack("<L", fileBytes[12:16])[0]
+    EXPORT_DIRECTORY_FIRST_THUNK = struct.unpack("<L", fileBytes[16:20])[0]
+    # I fully acknowledge that this line looks insane, but EXPORT_DIRECTORY_NAME is (for example) 0x6153, DATA_DIRECTORY_IMPORT_TABLE is (for example) 0x6000
+    # So importTableOffset + (0x6153-0x6000) gives us the offset in the raw data to where the DLL name string lives.
+    importedDllName = (processString(originalFileBytes[importTableOffset+(EXPORT_DIRECTORY_NAME-DATA_DIRECTORY_IMPORT_TABLE):]))
+    break
