@@ -10,16 +10,17 @@ The reason for this tool's creation is that it's a little inconvenient needing t
 ## Usage - 
 
 ```
-usage: dumpybin.py [-h] [--debug | --no-debug] DLL
+usage: dumpybin.py [-h] [--debug] [-s] DLL
 
 Processes a DLL file and outputs the exported functions and function ordinals, just like the Big Boy Dumpbin does.
 
 positional arguments:
-  DLL                  The path to the DLL which should be processed by dumpybin.
+  DLL             The path to the DLL which should be processed by dumpybin.
 
 optional arguments:
-  -h, --help           show this help message and exit
-  --debug, --no-debug  supply this option to output a bunch of debugging data for nerds. (default: --no-debug)
+  -h, --help      show this help message and exit
+  --debug         supply this option to output a bunch of debugging data for nerds.
+  -s, --sections  Dump out sections data
 ```
 
 ---
